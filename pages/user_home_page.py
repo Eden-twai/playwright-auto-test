@@ -163,9 +163,18 @@ class UserHomePage:
         此方法會建立真正的對話紀錄。送出後失敗不自動重送、不刪除歷史。
         回覆僅檢查非空白及可從歷史重新開啟，不宣稱生成已完整結束或語意正確。
         """
+        origin_url = self.send_chat_message(message)
+        session_id, reply_length = self.expect_chat_reply(message, origin_url, timeout_ms)
+        title = self.reopen_chat_history(session_id)
+        self.expect_reopened_chat(message, session_id, timeout_ms)
+        return {"session_id": session_id, "history_title": title,
+                "reply_nonempty": True, "reply_length_observed": reply_length,
+                "history_reopened": True, "sent_messages": 1}
+
+    def send_chat_message(self, message: str) -> str:
+        origin_url = self.page.url
         if not message.strip():
             raise ValueError("測試訊息不可為空白")
-        before_url = urlsplit(self.page.url)
         if self.chat_session_id(self.page.url) is not None:
             raise AssertionError("送出前必須位於新對話首頁，不能接續既有 session")
         expect(self.page.locator(".message-wrapper.user-message")).to_have_count(0)
@@ -180,20 +189,27 @@ class UserHomePage:
         print("Chat：送出一則測試訊息；後續檢查失敗不會自動重送。", flush=True)
         send.click()
 
-        def is_new_session(url):
-            parsed = urlsplit(str(url))
-            return (parsed.scheme == before_url.scheme
-                    and parsed.netloc == before_url.netloc
-                    and parsed.path == before_url.path
-                    and self.chat_session_id(str(url)) is not None)
+        return origin_url
 
-        self.page.wait_for_url(is_new_session, timeout=30_000)
+    def _is_chat_session_url(self, url: str, origin_url: str) -> bool:
+        parsed, origin = urlsplit(url), urlsplit(origin_url)
+        return (
+            (parsed.scheme, parsed.netloc, parsed.path)
+            == (origin.scheme, origin.netloc, origin.path)
+            and self.chat_session_id(url) is not None
+        )
+
+    def expect_chat_reply(
+        self, message: str, origin_url: str, timeout_ms: int = 120_000
+    ) -> tuple[str, int]:
+        self.page.wait_for_url(lambda url: self._is_chat_session_url(str(url), origin_url), timeout=30_000)
         session_id = self.chat_session_id(self.page.url)
         assert session_id is not None
         print("Chat：已建立非空白 sessionId。", flush=True)
         users = self.page.locator(".message-wrapper.user-message")
         expect(users).to_have_count(1, timeout=30_000)
         expect(users).to_have_text(message)
+        editor = self.page.get_by_placeholder("詢問任何問題", exact=True)
         expect(editor).to_have_value("", timeout=30_000)
         replies = self.page.locator(".message-wrapper.assistant-message .message-content")
         expect(replies).to_have_count(1, timeout=timeout_ms)
@@ -201,6 +217,10 @@ class UserHomePage:
         reply_length = len(replies.inner_text().strip())
         print(f"Chat：出現非空白模型回覆（目前 {reply_length} 字元）。", flush=True)
 
+        return session_id, reply_length
+
+    def reopen_chat_history(self, session_id: str) -> str:
+        origin_url = self.page.url
         active_title = self.page.locator(".session-list .session-item.active .session-title")
         expect(active_title).to_have_count(1, timeout=30_000)
         expect(active_title).to_have_text(re.compile(r"\S"), timeout=30_000)
@@ -219,7 +239,7 @@ class UserHomePage:
             old_session = self.chat_session_id(self.page.url)
             candidate.click()
             # 同標題的不同對話也會導覽；等 sessionId 出現後再比較。
-            self.page.wait_for_url(lambda url: is_new_session(url)
+            self.page.wait_for_url(lambda url: self._is_chat_session_url(str(url), origin_url)
                                    and self.chat_session_id(str(url)) != old_session,
                                    timeout=15_000)
             if self.chat_session_id(self.page.url) == session_id:
@@ -227,14 +247,19 @@ class UserHomePage:
                 break
         if not found:
             raise AssertionError("歷史紀錄候選未開回本輪新建立的 sessionId")
+        return title
+
+    def expect_reopened_chat(
+        self, message: str, session_id: str, timeout_ms: int = 120_000
+    ) -> None:
+        assert self.chat_session_id(self.page.url) == session_id
+        users = self.page.locator(".message-wrapper.user-message")
+        replies = self.page.locator(".message-wrapper.assistant-message .message-content")
         expect(users).to_have_count(1, timeout=30_000)
         expect(users).to_have_text(message)
         expect(replies).to_have_count(1, timeout=timeout_ms)
         expect(replies).to_have_text(re.compile(r"\S"), timeout=timeout_ms)
         print("Chat：歷史紀錄可開回同一 session，送出內容與回覆均存在。", flush=True)
-        return {"session_id": session_id, "history_title": title,
-                "reply_nonempty": True, "reply_length_observed": reply_length,
-                "history_reopened": True, "sent_messages": 1}
 
     def open_prompt_library(self) -> None:
         self.sidebar_button("提示詞庫").click()
@@ -319,7 +344,11 @@ class UserHomePage:
         expect(start).to_be_visible()
 
     def click_ai_app_start(self, name: str) -> None:
-        """只點開始使用，不傳送訊息；要求有可觀測的導覽變化。"""
+        navigation = self.start_ai_app(name)
+        self.expect_ai_app_started(name, navigation)
+
+    def start_ai_app(self, name: str) -> tuple[str, int]:
+        """點擊「開始使用」，保留點擊前的網址與分頁數。"""
         card = self.ai_app_card(name)
         start = card.locator("button.btn-agentCard-default").filter(
             has_text=re.compile(r"^\s*開始使用\s*$")
@@ -328,6 +357,11 @@ class UserHomePage:
         old_url = self.page.url
         old_pages = len(self.page.context.pages)
         start.click()
+        return old_url, old_pages
+
+    def expect_ai_app_started(self, name: str, navigation: tuple[str, int]) -> None:
+        old_url, old_pages = navigation
+        card = self.page.locator(".card-agent").filter(has_text=name)
         # 不假設 App 內頁有 Chat 輸入框；確認卡片離開當前畫面、網址變化或開新分頁。
         import time
         deadline = time.monotonic() + 10

@@ -257,7 +257,7 @@ def save_failure(page: Page) -> None:
         print(f"保存截圖失敗：{type(exc).__name__}")
 
 
-def _require_write() -> None:
+def require_ai_app_write() -> None:
     if os.getenv("AI_APP_TEST_WRITE") != "I_UNDERSTAND":
         pytest.skip("操作測試預設關閉；須設定 AI_APP_TEST_WRITE=I_UNDERSTAND")
 
@@ -281,7 +281,29 @@ def _ensure_enabled(app: PlatformManagerPage, *, allow_download: bool) -> None:
         print("AFS MyAgent 已啟用，直接進入使用者端驗證，不執行停用。")
     else:
         pytest.fail(f"不支援的 AI 應用狀態：{state}")
+
+
+def expect_ai_app_enabled(app: PlatformManagerPage) -> None:
     assert app.ai_app_state(TARGET_APP) == "enabled", "AFS MyAgent 尚未達到已啟用"
+
+
+def open_ai_app_management(page: Page) -> PlatformManagerPage:
+    app = PlatformManagerPage(page)
+    app.goto()
+    app.open_ai_application_management()
+    return app
+
+
+def activate_ai_app(app: PlatformManagerPage) -> None:
+    state = app.ai_app_state(TARGET_APP)
+    if state == "enabled" and os.getenv("AI_APP_TEST_ALLOW_DISABLE") == "YES":
+        print("AFS MyAgent 已啟用且已授權停用：執行停用 → 重新啟用。")
+        app.ai_app_choose_action(TARGET_APP, "停用")
+        wait_until(app, "downloaded_disabled", DISABLE_TIMEOUT)
+    _ensure_enabled(
+        app,
+        allow_download=os.getenv("AI_APP_TEST_ALLOW_DOWNLOAD") == "YES",
+    )
 
 
 def _verify_start(page: Page) -> None:
@@ -304,20 +326,11 @@ def test_ai_app_preflight(authenticated_page: Page) -> None:
 @pytest.mark.auth
 def test_ai_app_activation(authenticated_page: Page) -> None:
     """依起始狀態自動啟用；明確授權停用時，已啟用會跑完整循環。"""
-    _require_write()
-    app = PlatformManagerPage(authenticated_page)
+    require_ai_app_write()
     try:
-        app.goto()
-        app.open_ai_application_management()
-        state = app.ai_app_state(TARGET_APP)
-        if state == "enabled" and os.getenv("AI_APP_TEST_ALLOW_DISABLE") == "YES":
-            print("AFS MyAgent 已啟用且已授權停用：執行停用 → 重新啟用。")
-            app.ai_app_choose_action(TARGET_APP, "停用")
-            wait_until(app, "downloaded_disabled", DISABLE_TIMEOUT)
-        _ensure_enabled(
-            app,
-            allow_download=os.getenv("AI_APP_TEST_ALLOW_DOWNLOAD") == "YES",
-        )
+        app = open_ai_app_management(authenticated_page)
+        activate_ai_app(app)
+        expect_ai_app_enabled(app)
         _verify_start(authenticated_page)
     except Exception:
         save_failure(authenticated_page)
@@ -342,7 +355,7 @@ def test_ai_app_start_only(authenticated_page: Page) -> None:
 @pytest.mark.auth
 def test_ai_app_disable_enable_cycle(authenticated_page: Page) -> None:
     """高風險完整循環獨立測試：需獲准停用才執行，不混入一般啟用流程。"""
-    _require_write()
+    require_ai_app_write()
     if os.getenv("AI_APP_TEST_ALLOW_DISABLE") != "YES":
         pytest.skip("完整循環需額外設定 AI_APP_TEST_ALLOW_DISABLE=YES")
     app = PlatformManagerPage(authenticated_page)

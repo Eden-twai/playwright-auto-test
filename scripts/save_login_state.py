@@ -101,22 +101,34 @@ def automatic_login(page, config: Settings) -> None:
     confirm_logged_in(page, config)
 
 
-def confirm_logout(page, config: Settings) -> None:
+def click_logout(page, config: Settings) -> None:
     run_step("開啟帳號及設定", lambda: page.locator(config.account_menu_selector).click())
     run_step("點擊登出", lambda: page.locator(config.logout_selector).click())
     run_step("確認登出後帳號欄位", lambda: page.locator(
         config.username_selector).wait_for(state="visible"))
     run_step("確認登出後密碼欄位", lambda: page.locator(
         config.password_selector).wait_for(state="visible"))
+
+
+def revisit_management_page(page) -> None:
     # 不清 Cookie；回訪同一受保護頁，確認 SSO 不會直接登入回去。
     run_step("重新進入受保護的管理頁", lambda: page.goto(
         "/platform-manager", wait_until="domcontentloaded"))
+
+
+def expect_login_required(page, config: Settings) -> None:
     run_step("確認仍要求輸入帳號", lambda: page.locator(
         config.username_selector).wait_for(state="visible"))
     run_step("確認仍要求輸入密碼", lambda: page.locator(
         config.password_selector).wait_for(state="visible"))
     if is_management_url(page.url, config.base_url):
         raise ValueError("登出後仍停留在管理頁，不能判定登出成功。")
+
+
+def confirm_logout(page, config: Settings) -> None:
+    click_logout(page, config)
+    revisit_management_page(page)
+    expect_login_required(page, config)
 
 
 def save_verified_state(browser, context, config: Settings, state_path: Path | None = None) -> None:

@@ -35,9 +35,21 @@ REGRESSION_FILES = (
     "tests/test_platform_manager.py",
     "tests/test_user_home.py",
 )
+GHERKIN_REGRESSION_FILES = (
+    "tests/bdd/site_access_regression_steps.py",
+    "tests/bdd/platform_manager_regression_steps.py",
+    "tests/bdd/user_home_regression_steps.py",
+)
+GHERKIN_REGRESSION_FEATURES = tuple(
+    path.removesuffix("_steps.py") + ".feature" for path in GHERKIN_REGRESSION_FILES
+)
 MANUAL_TARGETS = (
     "tests/manual_model_activation.py::test_model_activation_and_chat",
     "tests/manual_ai_application_activation.py::test_ai_app_activation",
+)
+GHERKIN_TARGETS = (
+    "tests/bdd/model_chat_steps.py",
+    "tests/bdd/ai_app_steps.py",
 )
 REQUIRED_MANUAL_ENV = {
     "MODEL_TEST_WRITE": "I_UNDERSTAND",
@@ -82,7 +94,9 @@ def source_hashes() -> dict[str, str]:
         base = ROOT / folder
         if not base.is_dir():
             continue
-        for path in sorted(base.rglob("*.py")):
+        for path in sorted(base.rglob("*")):
+            if not path.is_file() or path.suffix not in {".py", ".feature"}:
+                continue
             if any(p in {".venv", "__pycache__", ".git"} for p in path.parts):
                 continue
             result[path.relative_to(ROOT).as_posix()] = hashlib.sha256(
@@ -134,7 +148,10 @@ def parse_junit(path: Path) -> dict:
 
 
 def is_ai_app_entry_test(name: str) -> bool:
-    return name.split("[", 1)[0] == AI_APP_ENTRY_TEST
+    return name.split("[", 1)[0] in {
+        AI_APP_ENTRY_TEST,
+        "tests.bdd.user_home_regression_steps::test_ai_apps_can_be_opened_and_returned",
+    }
 
 
 def regression_skip_policy(stage_id: str, counts: dict, max_skips: int) -> tuple[str, str]:
@@ -288,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="指定一般回歸中的單項測試，可重複給定")
     parser.add_argument("--manual-activation", action="store_true",
                         help="實際停用並重新啟用模型與 AI 應用（需額外四項授權）")
+    parser.add_argument("--gherkin", action="store_true",
+                        help="以 Gherkin 執行前後回歸及模型與 AI 應用操作，沿用整輪登入狀態")
     parser.add_argument("--auto-login", action="store_true",
                         help="自動登入後跑測試，整輪結束或失敗時嘗試登出")
     parser.add_argument("--chat-send", action="store_true",
@@ -301,6 +320,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-regression-skips", type=int, default=5,
                         help="一般回歸 Skip 上限，預設 5；啟用前另允許 1 項已知 AI 應用入口缺少，啟用後入口必須通過")
     args = parser.parse_args(argv)
+    regression_files = GHERKIN_REGRESSION_FILES if args.gherkin else REGRESSION_FILES
+    if args.gherkin and not (args.auto_login and args.manual_activation and args.chat_send):
+        parser.error("--gherkin 必須搭配 --auto-login --manual-activation --chat-send")
     if args.chat_send and not args.manual_activation:
         parser.error("--chat-send 必須搭配 --manual-activation")
     if args.auth_browser_channel and args.auth_browser != "chromium":
@@ -321,7 +343,8 @@ def main(argv: list[str] | None = None) -> int:
         "started_at": now_taipei(),
         "finished_at": None,
         "overall": "RUNNING",
-        "mode": "manual_activation" if args.manual_activation else "regression_only",
+        "mode": ("gherkin" if args.gherkin else
+                 "manual_activation" if args.manual_activation else "regression_only"),
         "auto_login": args.auto_login,
         "chat_send_requested": args.chat_send,
         "expected_regression_count": args.expected_regression_count,
@@ -457,11 +480,28 @@ def main(argv: list[str] | None = None) -> int:
         if invalid:
             update("targeted", "BLOCKED", f"禁止執行非一般回歸目標：{invalid}")
         missing_permissions = missing_manual_permissions(os.environ) if args.manual_activation else []
+        if args.gherkin:
+            missing_permissions = [name for name in missing_permissions if name.endswith("_WRITE")]
         if missing_permissions:
             update("manual_activation", "BLOCKED",
                    f"缺少明確授權：{', '.join(missing_permissions)}")
         if invalid or missing_permissions:
             return stop("BLOCKED", "目標白名單或操作授權不符", 2)
+
+        if args.gherkin:
+            missing_bdd = [
+                name for name in GHERKIN_TARGETS + GHERKIN_REGRESSION_FEATURES + (
+                    "tests/bdd/conftest.py", "tests/bdd/model_chat.feature", "tests/bdd/ai_app.feature",
+                )
+                if not (ROOT / name).is_file()
+            ]
+            if importlib.util.find_spec("pytest_bdd") is None:
+                missing_bdd.append("pytest-bdd")
+            if importlib.util.find_spec("pytest_playwright") is None:
+                missing_bdd.append("pytest-playwright")
+            if missing_bdd:
+                update("manual_activation", "BLOCKED", f"缺少 Gherkin 所需檔案或套件：{', '.join(missing_bdd)}")
+                return stop("BLOCKED", "Gherkin 執行環境未就緒", 2)
 
         compile_errors = []
         compiled = 0
@@ -480,11 +520,11 @@ def main(argv: list[str] | None = None) -> int:
         if compile_errors:
             return stop("FAIL", "Python 靜態語法檢查失敗", 1)
 
-        missing = [name for name in REGRESSION_FILES if not (ROOT / name).is_file()]
+        missing = [name for name in regression_files if not (ROOT / name).is_file()]
         if missing:
             update("collection", "BLOCKED", f"缺少完整一般回歸測試檔：{', '.join(missing)}")
             return stop("BLOCKED", "缺少一般回歸測試檔", 2)
-        collection_cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", *REGRESSION_FILES]
+        collection_cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", *regression_files]
         log = run_dir / "collection.log"
         update("collection", "RUNNING", command=collection_cmd, log=str(log.relative_to(ROOT)))
         code, duration, stdout = run_command(collection_cmd, log, env=child_env)
@@ -522,7 +562,9 @@ def main(argv: list[str] | None = None) -> int:
         # 整輪只接受命令列的明確選擇，避免繼承的環境變數意外送出訊息。
         child_env = dict(os.environ) if child_env is None else child_env
         child_env["MODEL_TEST_CHAT_SEND"] = "YES" if args.chat_send else "NO"
-        if args.chat_send:
+        if args.gherkin:
+            stages["manual_activation"]["label"] = "Gherkin 模型對話與 AFS MyAgent 操作"
+        elif args.chat_send:
             stages["manual_activation"]["label"] = "模型與 AI 應用操作（含一則模型對話送出驗證）"
 
         addons = ["-v", "-rs"]
@@ -536,9 +578,13 @@ def main(argv: list[str] | None = None) -> int:
 
         def pytest_cmd(stage_id: str, targets: tuple[str, ...] | list[str], *,
                        manual: bool = False) -> list[str]:
-            cmd = [sys.executable, "-m", "pytest", *targets, *addons]
+            cmd = [sys.executable, "-u", "-m", "pytest", *targets, *addons]
+            if args.gherkin and stage_id in {"regression_before", "regression_after"}:
+                cmd += ["--gherkin-terminal-reporter", "-vv"]
             if manual:
                 cmd += ["-s", "--headed", "--slowmo", "1000"]
+                if args.gherkin:
+                    cmd += ["--gherkin-terminal-reporter", "-vv"]
             if html_enabled:
                 cmd += ["--html", str(run_dir / f"{stage_id}.html"), "--self-contained-html"]
             return cmd
@@ -550,17 +596,21 @@ def main(argv: list[str] | None = None) -> int:
             update("targeted", "NOT_REQUESTED", "未指定 --target，非必做階段")
 
         if not execute("regression_before",
-                       pytest_cmd("regression_before", REGRESSION_FILES),
+                       pytest_cmd("regression_before", regression_files),
                        count_expected=args.expected_regression_count):
             return stop("FAIL", "一般回歸失敗或範圍不符", 1)
 
         if args.manual_activation:
             manual_ok = execute("manual_activation",
-                                pytest_cmd("manual_activation", MANUAL_TARGETS, manual=True),
+                                pytest_cmd(
+                                    "manual_activation",
+                                    GHERKIN_TARGETS if args.gherkin else MANUAL_TARGETS,
+                                    manual=True,
+                                ),
                                 count_expected=2, require_no_skips=True)
             # 即使啟停失敗，也要再測一次唯讀回歸，留下系統實際狀態。
             after_ok = execute("regression_after",
-                               pytest_cmd("regression_after", REGRESSION_FILES),
+                               pytest_cmd("regression_after", regression_files),
                                count_expected=args.expected_regression_count)
             data["overall"] = "PASS" if manual_ok and after_ok else "FAIL"
         else:

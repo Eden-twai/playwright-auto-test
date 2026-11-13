@@ -1,261 +1,411 @@
-# AI Hub 自動化測試
+# ai_hub-playwright-test
 
-使用 Python＋Playwright，透過瀏覽器驗證 AI Hub 的平台管理、使用者介面、模型與 AI 應用操作，以及模型對話流程。
+AI Hub 的 Playwright + Python 瀏覽器自動化測試專案。
 
-本專案由本機指令啟動，目前不包含 CI。一般回歸與服務操作分開授權；完整驗證會實際呼叫後端、可能暫時中斷服務，並建立一則真實對話。
+主要涵蓋 Platform Manager 與使用者首頁的**唯讀／低風險回歸測試**，包括網站連線、登入後載入、側欄與頁面導航、表格與操作選單，以及依環境狀態顯示的 AI 應用入口。
 
-## 測試內容
+- **最新同批次驗證 PASS（2026-10-29 11:45:21–11:56:07，台灣時間）**：批次 `20261029T034521_440063Z_8770`，啟用前 **40 passed／6 skipped**、模型與 AI 應用操作 **2 passed**、啟用後 **41 passed／5 skipped in 55.32s**；全部 0 failed／errors。基礎 Git Commit `2cbbbe4e`，當時**有未提交修改**；完整版本以同批次 JSON 的來源 SHA256 追溯。入口由啟用前略過轉為啟用後通過。這個 PASS 不單獨證明本輪兩者都有停用，也不證明重試第二次點擊已觸發。
+- **本輪使用者端驗證範圍**：模型達 enabled、Chat 可選模型與輸入；AFS MyAgent 約 29.9 秒啟用後點「開始使用」，確認畫面／網址／分頁切換。均未送出訊息；實際模型回覆、首次下載與第二次重試實機觸發仍未確認。10/28 完整停用循環的歷史 PASS 與歷史 FAIL 保留在下方及 [TEST_CASES.md](TEST_CASES.md)。
+- **Chat 首頁等待策略**：一般 UI 回歸的 `UserHomePage.expect_loaded()` 預設最多等待 **20 秒**；已獲授權的模型完整啟停，在重新啟用後驗證 Chat 首頁時指定 **100 秒**。失敗時另記錄去除 URL 查詢參數的頁面位置、標題與載入狀態。較早的一次模型雖已啟用，但 Chat 首頁驗證遭登入導向／白畫面干擾而 FAIL；本輪通過不等於已確認唯一根因。
+- **2026-10-28 新增固定驗證入口**：`python scripts/run_validation.py`。這會檢查語法、核對 46 項收集範圍、執行一般回歸並留下獨立報表；具破壞性的完整啟停需另外明確授權。
+- **2026-10-28 Mac 較早一般模式批次（歷史）PASS**：收集及執行 46 項，`41 passed, 5 skipped, 0 failed`；14:11–14:12（台灣時間），該輪執行器整體 `PASS`，當時 Git Commit 為 `5c91ddf`，但工作區有未提交修改。該批次沒有執行啟停及後驗回歸，不能與最上方的新批次混為同一輪。
+- **2026-10-28 Mac 離線驗證已實測 PASS**：`selfcheck_validation.py` 5 項，以及新版 `verify_flow_offline.py` 18 項，兩者都不需登入 AI Hub；18 項包含 6 種原有狀態、10 種重試分支、授權檢查及失敗紀錄保留。
+- **先前交付副本的歷史限制**：當時只取得部分修正版與文件 ZIP，因缺少三支一般回歸 `test_*.py`，在交付副本執行曾回報 `BLOCKED`。**這不代表你 Mac 的正式專案仍被阻擋**；後續已取得上述 10/28 Mac 完整回歸 PASS。
+- 2026-10-21 的完整成功回歸為歷史紀錄：`41 passed, 5 skipped, 0 failed in 53.14s`（另有更早 44.85 秒批次）。
+- 五項 Skip 因群組、LDAP、API 端點／金鑰的測試資料或啟用條件不足；不是失敗。
+- AFS MyAgent 的下載／啟用等**會呼叫後端的操作型測試**另行手動觸發，不納入上述 46 項一般回歸。
+- 維護歷史結果與測試案例請見 [TEST_CASES.md](TEST_CASES.md)，詳細排查紀錄請見 [PLAYWRIGHT_NOTES.md](PLAYWRIGHT_NOTES.md)。
 
-| 範圍 | 驗證內容 |
-|---|---|
-| 登入與登出 | 自動輸入帳密、驗證登入狀態；結束後登出，回訪管理頁確認仍要求登入 |
-| 一般回歸 | 46 項案例，涵蓋網站連線、平台管理頁面、側欄導航、表格／功能選單、空狀態與使用者介面 |
-| 模型操作 | 依起始狀態啟用，或停用後重新啟用；確認使用者端可選模型與輸入 |
-| AI 應用操作 | 依起始狀態啟用，或停用後重新啟用；確認 AFS MyAgent「開始使用」可進入 |
-| 模型對話 | 送出一則訊息、確認新 sessionId 與非空白回覆，從歷史紀錄重新開啟同一對話 |
+## 0. 固定驗證入口與交付門檻（2026-10-28 新增）
 
-目前主要操作對象為 **Llama3.1-FFM-8B** 與 **AFS MyAgent**。測試站需具備對應資料及操作權限；若目標名稱或介面不同，需先核對測試程式。
+將此交付包的 `scripts/run_validation.py`、`scripts/selfcheck_validation.py` 與修正版檔案合併回**完整專案根目錄**（保留你的 `conftest.py`、`pytest.ini`、`requirements.txt`、`.env` 與 `.auth`；不要以交付 ZIP 整包覆蓋完整專案）。
 
-## 1. 執行前準備
+### 在 Mac 的 iTerm 執行：登入狀態確認 → 測試
 
-- Python 3.10 以上；實際相容版本與套件依專案 `requirements.txt` 為準。
-- 取得完整專案，保留資料夾結構，不要只複製個別測試檔。
-- 電腦能連線至測試站；若有公司內網或 VPN 限制，先完成連線。
-- 自備可登入且具備測試範圍所需權限的測試帳號。
-- 完整驗證前，確認環境允許模型與 AI 應用暫時停用、重新啟用及建立測試對話。
+**iTerm 是執行 Python 測試指令的 Terminal，不負責登入網站。** Playwright 會使用本機保存的登入狀態；**不必每次測試前重新登入**，但登入狀態不存在或過期時，必須先更新。
 
-以下指令以 **macOS／Linux 的 Bash 或 Zsh** 為例，可在 Terminal 或 iTerm 執行。
+1. 開啟 iTerm，進入專案資料夾並啟用虛擬環境：
 
-## 2. 首次安裝
+   ```bash
+   cd ai_hub-playwright-test
+   source .venv/bin/activate
+   ```
 
-取得 Git 專案後，進入專案根目錄：
+2. 確認 `.env` 的 `BASE_URL` 是本次要測的 AI Hub 網址，且 `.auth/user.json` 已存在。**檔案存在不代表登入一定有效**。
+3. 第一次測試、切換網站，或測試被導向登入頁時，在 iTerm 執行：
 
-```bash
-cd ai_hub-playwright-test
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m playwright install chromium
-```
+   ```bash
+   python scripts/save_login_state.py
+   ```
 
-之後每次重新開啟終端機，只需進入專案並啟用虛擬環境：
+   腳本開啟 Chromium 後，**在瀏覽器手動登入並確認進入 Platform Manager**，再回 iTerm 按 Enter，更新 `.auth/user.json`。不要在 Chat、Git 或報告中貼出此檔案。
+4. 登入有效後，執行一般回歸：
 
-```bash
-cd ai_hub-playwright-test
-source .venv/bin/activate
-```
+   ```bash
+   python scripts/run_validation.py
+   ```
 
-`.venv` 是 Python 虛擬環境；`source .venv/bin/activate` 不會讀取 `.env`。網址與帳密由程式另外載入。
+5. 查看 `reports/validation_summary.md`，核對收集 46 項、Pass／Fail／Skip、Skip 原因與 Git 工作區狀態；只有通過且另外獲得服務中斷授權，才考慮 `--manual-activation`。
 
-## 3. 設定測試網址與帳密
-
-若專案提供 `.env.example`，複製後填入自己的設定：
+**純離線檢查不需要登入、瀏覽器或 AI Hub 連線**，可直接執行：
 
 ```bash
-cp .env.example .env
+python -m unittest scripts/selfcheck_validation.py -v
+python verify_flow_offline.py
 ```
 
-若沒有範例檔，在專案根目錄自行建立 `.env`，至少包含：
-
-```dotenv
-BASE_URL=https://your-ai-hub.example.com
-TEST_USERNAME=your_test_account
-TEST_PASSWORD=your_test_password
-```
-
-- `BASE_URL` 填網站根網址，不要包含 `/platform-manager`、登入網址、查詢參數或帳密。
-- 請將範例值換成實際設定；帳密含特殊字元時，依 dotenv 格式使用引號包住。
-- 切換測試站時修改 `BASE_URL`，並重新登入；不要沿用另一站的登入狀態。
-- `.env` 與 `.auth/` 屬於本機資料，不可提交 Git 或當作交接檔傳送。
-
-目前自動登入使用既有 AI Hub 的登入／登出元件定位。其他環境若介面不同，可核對 `scripts/save_login_state.py` 的 `AUTH_*_SELECTOR` 設定；不要只替換網址就假設所有定位都相容。
-
-## 4. 選擇執行模式
-
-### A. 一般回歸：不操作服務啟停
-
-建議第一次接手先執行此模式，確認環境、帳號與介面可用：
-
-```bash
-PYTEST_ADDOPTS="" \
-python scripts/run_validation.py --auto-login
-```
-
-執行自動登入、46 項一般回歸與最後登出；不加入模型／AI 應用啟停，也不送出模型對話。
-
-若已有有效的本機登入狀態，可執行：
+**一般模式（預設唯讀／低風險；不會執行 `manual_*.py`）：**
 
 ```bash
 python scripts/run_validation.py
 ```
 
-沒有 `--auto-login` 時，不會自動輸入帳密或提供整輪自動登出流程。登入狀態不存在或過期時，可先另行執行：
+**修改特定功能後，先跑指定案例再跑 46 項：**
 
 ```bash
-python scripts/save_login_state.py --auto
+python scripts/run_validation.py \
+  --target tests/test_platform_manager.py::test_platform_manager_is_loaded
 ```
 
-這個獨立指令會驗證並儲存 `.auth/user.json`，供後續測試使用。
-
-### B. 完整驗證／Demo：登入、前後回歸、啟停與對話
-
-**此模式可能中斷目前運作中的模型與 AI 應用，並保留一則測試對話。請只在已允許操作的環境執行。**
+**完整啟停模式（會中斷模型與 AI 應用服務；僅限允許操作的測試環境）：**
 
 ```bash
-PYTEST_ADDOPTS="" \
+MODEL_TEST_WRITE=I_UNDERSTAND \
+MODEL_TEST_ALLOW_DISABLE=YES \
+AI_APP_TEST_WRITE=I_UNDERSTAND \
+AI_APP_TEST_ALLOW_DISABLE=YES \
+python scripts/run_validation.py --manual-activation
+```
+
+**啟停並開啟兩者各自最多一次重試（環境已允許啟停與重試時）：**
+
+```bash
 MODEL_TEST_WRITE=I_UNDERSTAND \
 MODEL_TEST_ALLOW_DISABLE=YES \
 MODEL_TEST_ALLOW_RETRY=YES \
 AI_APP_TEST_WRITE=I_UNDERSTAND \
 AI_APP_TEST_ALLOW_DISABLE=YES \
 AI_APP_TEST_ALLOW_RETRY=YES \
-python scripts/run_validation.py --auto-login --manual-activation --chat-send
+python scripts/run_validation.py --manual-activation
 ```
 
-不需要先執行 `save_login_state.py --auto`，完整指令已包含自動登入。
+重試預設關閉；上面兩個重試旗標必須明確加入才開啟。第一次成功就不會點第二次。執行器不會自動授予下載權限。起始為已下載未啟用時直接啟用；起始已啟用且有停用授權時，才執行停用再啟用，不能只看模式名稱判定操作路徑。
 
-流程順序：
+一般回歸預設不主動顯示瀏覽器；操作型階段會加入 `--headed --slowmo 300`。前置關卡未通過時不會進入操作型階段，因此不會看到該階段的瀏覽器。
 
-1. 檢查 Python 語法與一般回歸案例收集範圍。
-2. 自動登入並驗證登入狀態。
-3. 執行操作前的 46 項一般回歸。
-4. 執行模型操作，並送出一則訊息，確認回覆與歷史紀錄。
-5. 執行 AI 應用操作，確認「開始使用」可進入。
-6. 再執行一次 46 項一般回歸。
-7. 登出並回訪管理頁，確認仍要求登入，產出整輪摘要。
+| 固定關卡 | 一般模式 | 完整啟停模式 |
+|---|---|---|
+| 1. Python 靜態語法 | 必跑 | 必跑 |
+| 2. pytest 收集數與清單核對 | 三支 `test_*.py`，應收集 **46 項** | 同左 |
+| 3. 指定單項測試 | 有提供 `--target` 才執行 | 有提供才執行 |
+| 4. 一般完整回歸 | 必跑，0 FAILED／0 ERROR | 啟停前必跑 |
+| 5. 模型＋AI 應用完整啟停 | **不執行** | 四項明確授權後執行 |
+| 6. 啟停後再次回歸 | **不適用** | 必跑；即使啟停失敗也保留後驗結果 |
 
-前置檢查或前回歸未通過時，不會進入後續服務操作。實際已執行與未執行階段，以該批次摘要為準。
+- 一般回歸必須收集及實際執行 **46 項**，每項 Skip 必須有原因；其他略過預設最多 **5 項**。`regression_before` 對指定入口案例 `test_ai_apps_can_be_opened_and_returned` 且原因為「使用者介面沒有 AI 應用入口」，另外允許最多 **1 項**；仍保留實際 6 skipped 與原因，不改成 Pass。這是依測試名稱與原因判定，入口缺少是否符合環境狀態仍須核對。
+- `regression_after` 要求 AI 應用入口案例實際通過；略過、失敗或缺少皆 FAIL，即使提高 `--max-regression-skips` 也不能繞過。其他五項的數量上限不是案例白名單，仍要人工核對原因。新增／刪除案例時先審核，再調整 `--expected-regression-count`；不需為正常的啟用前空狀態改成 `--max-regression-skips 6`。
+- 靜態、單項、收集數或前置回歸失敗會阻止後續啟停；`--target` 限定既有一般測試檔，無法藉此插入操作型測試。缺少必要測試檔就回報 `BLOCKED`，不當成 PASS。
+- 每輪自動保存 `reports/validation_summary.json`、`reports/validation_summary.md`，及 `reports/validation_runs/<執行批次>/` 中的日誌、JUnit XML、可能的 HTML 報告與歷史摘要；記錄時間（台灣時區）、Git Commit、工作區狀態、來源檔 SHA256、Skip 原因。
+- 一般回歸 PASS **不代表**服務啟停 PASS；操作型測試 PASS 也**不代表**修改後 46 項回歸 PASS。只有本輪必要關卡都完成，摘要才標示整體 `PASS`。
+- 如執行器回傳非零：`1` 表示測試失敗，`2` 表示環境或授權阻擋，`130` 表示中止；不得據此更新為「已驗證通過」。報表、截圖、Trace 可能包含敏感資訊，切勿直接提交公開 Git。
 
-| 指令參數 | 意思 |
-|---|---|
-| `--auto-login` | 本輪自動登入，結束時執行登出驗證 |
-| `--manual-activation` | 加入模型與 AI 應用操作，以及操作後回歸；瀏覽器點擊仍由程式執行 |
-| `--chat-send` | 在模型操作案例內加入真實對話送出、回覆與歷史重開驗證 |
+執行器自身的離線驗證（不連 AI Hub）：
 
-| 環境變數 | 授權內容 |
-|---|---|
-| `MODEL_TEST_WRITE=I_UNDERSTAND` | 允許模型寫入操作 |
-| `MODEL_TEST_ALLOW_DISABLE=YES` | 允許停用已啟用模型 |
-| `MODEL_TEST_ALLOW_RETRY=YES` | 符合條件時允許最多一次啟用重試 |
-| `AI_APP_TEST_WRITE=I_UNDERSTAND` | 允許 AI 應用寫入操作 |
-| `AI_APP_TEST_ALLOW_DISABLE=YES` | 允許停用已啟用 AI 應用 |
-| `AI_APP_TEST_ALLOW_RETRY=YES` | 符合條件時允許最多一次啟用重試 |
+```bash
+python -m unittest scripts/selfcheck_validation.py -v
+```
 
-重試不是固定點擊兩次；第一次成功就繼續下一步。上述指令沒有授予下載權限：模型未下載時不會自行下載；AI 應用的下載需另有專門授權與前置條件，不能把上述啟用指令視為已允許下載。
+## 1. 建立 Python 環境
 
-實際操作依起始狀態決定：已下載未啟用時直接啟用；已啟用且獲停用授權時，先停用再啟用。`2 passed` 本身不能證明兩者都實際走過停用流程，需對照日誌。
+macOS Terminal：
 
-### 瀏覽器顯示與速度
+```bash
+cd ai_hub-playwright-test
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+```
 
-| 階段 | 目前設定 |
-|---|---|
-| 登入與登出 | 顯示瀏覽器，操作間隔 1 秒 |
-| 前後一般回歸 | 背景執行，不額外放慢 |
-| 模型／AI 應用操作、對話與歷史紀錄 | 顯示瀏覽器，操作間隔 1 秒 |
+之後每次重新開 Terminal，只需要：
 
-登入視窗可能保留到最後登出；一般回歸仍在背景執行。1 秒是 Playwright 操作間隔，不是帳密逐字輸入速度，也不是每個等待都固定 1 秒。
+```bash
+cd ai_hub-playwright-test
+source .venv/bin/activate
+```
 
-指令最前方的 `PYTEST_ADDOPTS=""` 用來清除繼承的額外 pytest 參數，避免先前全域 `--headed` 讓一般回歸也顯示視窗。
+## 2. 設定測試網址
 
-## 5. 查看結果與交付報告
+複製環境設定範例：
 
-執行結束先確認終端機的 **`[overall] PASS`**，再查看：
+```bash
+cp .env.example .env
+```
 
-- `reports/validation_summary.md`：最近一次執行摘要。
-- `reports/validation_summary.json`：最近一次結構化結果。
-- `reports/validation_runs/<批次目錄>/`：該次執行的摘要、日誌、JUnit XML 與 HTML 報告。
+目前文件記錄的測試站是 `https://202.5.254.27/`。若網址變更，請修改 `.env` 內的 `BASE_URL`；專案 `conftest.py` 會讀取這個設定。**通常不需要同時在指令加上 `--base-url`**，避免不同來源的設定混淆。
 
-完整驗證的三份 HTML 各自代表不同階段：
+## 3. 先執行不需登入的 Smoke Test
+
+```bash
+pytest tests/test_site_access.py -v
+```
+
+這支測試會開啟 `/platform-manager`，確認網站有回應、畫面可顯示，且沒有 5xx 錯誤。因為系統可能把未登入使用者導回登入頁，所以它不要求一定停留在 Platform Manager。
+
+## 4. 首次登入或登入過期時，儲存登入狀態
+
+```bash
+python scripts/save_login_state.py
+```
+
+程式會開啟 Chromium：
+
+1. 請在瀏覽器中手動完成登入。
+2. 確認已經進入 Platform Manager。
+3. 回到 Terminal 按 Enter。
+
+登入狀態會儲存在 `.auth/user.json`。這個檔案可能包含敏感的登入資訊，已加入 `.gitignore`，請勿 commit 或傳給其他人。
+
+如果登入狀態仍有效，可以直接在 iTerm 執行驗證指令，**不需每次重新產生 `.auth/user.json`**。若頁面被導向 `openid-connect/auth` 或登入頁，先更新登入狀態，再重新執行受影響的測試。
+
+## 5. 直接使用 pytest 與 HTML 報告（保留作診斷；正式驗證優先用統一執行器）
+
+先確認 `.env` 的測試網址，以及 `.auth/user.json` 的登入狀態。以下是原本直接使用 pytest 的替代指令；正式回歸與統一摘要請優先使用 `python scripts/run_validation.py`：
+
+```bash
+mkdir -p reports
+
+python -m pytest -v -rs \
+  --screenshot only-on-failure \
+  --tracing retain-on-failure \
+  --html=reports/report.html \
+  --self-contained-html
+```
+
+- `-v`：逐項列出測試結果；`-rs`：顯示略過原因。
+- `--html=reports/report.html --self-contained-html`：產生單一 HTML 報告。
+- `--screenshot only-on-failure`：測試失敗時保留截圖；`--tracing retain-on-failure`：只保留失敗測試的 Trace。
+- 這些是**執行參數**，沒有增加測試案例，也不代表已設定 GitHub Actions 或 CI。
+
+測試完成後，用 macOS 開啟報告：
+
+```bash
+open reports/report.html
+```
+
+正常快速執行而不產出 HTML／失敗證據，也可以使用 `python -m pytest -v`。想看瀏覽器實際操作，可加上 `--headed`。只執行 Smoke Test 可用 `python -m pytest -v -m smoke`。
+
+**報告成功產生不等於所有案例 Pass；請以該次 Terminal 的 `passed / skipped / failed` 結果為準。** 一般回歸不會自動收集 `tests/manual_*.py` 這類需授權的操作型測試。
+
+## 5.1 模型 + AI 應用的獨立操作測試（2026-10-28 更新）
+
+以下兩支 `manual_*.py` **不列入一般 46 項回歸**。兩項會依當下狀態執行：已下載未啟用時自動啟用；已啟用時，一般模式只驗證使用者端，只有明確授權停用的完整循環模式才會先停用再啟用。未下載時不會自動下載（除非 AI 應用另有專門下載授權；模型目前不自動下載）。
+
+**唯讀預檢（不啟用、不停用）：**
+
+```bash
+python -m pytest \
+  tests/manual_model_activation.py::test_model_activation_preflight \
+  tests/manual_ai_application_activation.py::test_ai_app_preflight \
+  -v -s --headed
+```
+
+**一般啟用與使用者端驗證（不主動停用）：**
+
+```bash
+MODEL_TEST_WRITE=I_UNDERSTAND \
+AI_APP_TEST_WRITE=I_UNDERSTAND \
+python -m pytest \
+  tests/manual_model_activation.py::test_model_activation_and_chat \
+  tests/manual_ai_application_activation.py::test_ai_app_activation \
+  -v -s --headed --slowmo 300 \
+  --screenshot only-on-failure --tracing retain-on-failure -x
+```
+
+**完整循環（會中斷已啟用服務，須先確認測試環境允許）：**
+
+```bash
+MODEL_TEST_WRITE=I_UNDERSTAND \
+MODEL_TEST_ALLOW_DISABLE=YES \
+AI_APP_TEST_WRITE=I_UNDERSTAND \
+AI_APP_TEST_ALLOW_DISABLE=YES \
+python -m pytest \
+  tests/manual_model_activation.py::test_model_activation_and_chat \
+  tests/manual_ai_application_activation.py::test_ai_app_activation \
+  -v -s --headed --slowmo 300 \
+  --screenshot only-on-failure --tracing retain-on-failure -x
+```
+
+### 操作型測試結果（最新與歷史分開；不加入 46 項回歸）
+
+| 日期／模式 | 模型 | AFS MyAgent | 當次 pytest 統計 |
+|---|---|---|---|
+| **2026-10-29 11:45 同批次驗證** | 最終 enabled；Chat 模型可選與輸入，未送訊息；所附截圖未完整呈現起始路徑 | downloaded_disabled → 啟用（約 29.9 秒）→ 開始使用，未送訊息；未執行先停用 | **2 passed**；前驗 40／6、後驗 41／5，整體 PASS；重試第二次點擊尚未確認 |
+| **2026-10-28 15:39 歷史統一完整驗證** | 停用 → 重新啟用 → Chat UI 驗證 PASS（最長等待 100 秒） | 停用 → 重新啟用 →「開始使用」PASS | **`2 passed in 155.52s`**；同批次前／後一般回歸均 PASS |
+| 2026-10-28 一般啟用 | 已啟用 → Chat 驗證 PASS | 已下載未啟用 → 啟用 → 開始使用 PASS（約 26.2 秒啟用） | `2 passed in 36.57s` |
+| 2026-10-28 **先前成功的完整循環** | 停用 → 重新啟用 → Chat PASS | 停用 → 重新啟用（約 26.1 秒）→ 開始使用 PASS | `2 passed in 139.70s` |
+| 2026-10-28 15:06 完整驗證（歷史失敗） | 模型恢復 `enabled`，但 Chat 首頁驗證在登入導向／白畫面時 FAIL | 停用 → 重新啟用 →「開始使用」PASS | `1 failed, 1 passed in 139.87s`（操作型階段）；當輪後驗回歸仍 PASS、整體 FAIL |
+| 2026-10-28 前一輪完整循環（歷史） | 停用 → 重新啟用 → Chat PASS | 停用後重新啟用逾時，最後為 `downloaded_disabled`，FAILED | `1 passed, 1 failed in 406.08s` |
+
+前一輪失敗時，AFS MyAgent 的「啟用」選項已被點擊，也觀察到 `enabling` 與部署提示；約 2.1 秒後回到 `downloaded_disabled`，直到 300 秒上限仍未達 `enabled`。**當時程式在等待期間沒有重複點擊啟用。** 若未來再度發生類似逾時，應先唯讀確認狀態並檢查部署日誌，不要直接重跑整個停用循環。2026-10-21 曾有成功的完整啟停紀錄（34.87 秒），此歷史紀錄同樣保留。
+
+**歷史進度補充：** 上述 AI 應用啟用逾時後，曾另一次取得 `2 passed in 139.70s`。AFS MyAgent 重新啟用約 26.1 秒後 `enabled`，並成功點「開始使用」。**10/28 當時的同批次完整驗證為 `2 passed in 155.52s`，前後兩輪一般回歸均 PASS；最新 10/29 啟用與回歸結果見上表。** 目前沒有提供實機自動重試觸發紀錄，因此仍只能標記完整循環 PASS、重試分支尚待實機驗證。後端偶發回退原因仍待查，不能因新 PASS 就刪除歷史 FAILED。
+
+### 目前的單次重試與等待提示
+
+| 對象 | 開關 | 首輪持續未啟用時 | 第二次點擊前 | 等待上限 |
+|---|---|---|---|---|
+| 模型 | `MODEL_TEST_ALLOW_RETRY=YES` | 連續 `downloaded_disabled` 20 秒後記錄異常 | 另外連續確認 10 秒；再核對寫入授權、模型狀態及其他運作中模型 | 每輪最多 600 秒；連續未啟用可提前結束 |
+| AI 應用 | `AI_APP_TEST_ALLOW_RETRY=YES` | 連續 `downloaded_disabled` 30 秒後記錄異常，不要求一定捕捉到短暫 `enabling` | 另外連續確認 10 秒；Page Object 點擊前再次核對寫入授權與狀態 | 每輪最多 300 秒；快速重試模式下第二輪同樣適用 30 秒未啟用判定 |
+
+- 最多只重試一次，**不是固定點兩次**。第一次成功就繼續使用者端驗證；仍在 `enabling` 時不再次點擊。確認期間若已成功則直接繼續；若轉為其他處理中或不允許狀態，就停止本次重試。
+- 等待過程每約 **10 秒**印出目前狀態及等待進度；上限不是固定睡滿的時間，觀察到成功即返回。
+- 模型紀錄保存在 `reports/model_activation/enable_attempts.log`，事件包含 `attempt_1_fallback`／`attempt_1_timeout`、`attempt_2_clicked` 與第二次結果。
+- AI 應用紀錄保存在 `reports/ai_application_activation/enable_attempts.log`，新版持續未啟用事件為 `attempt_1_disabled_30s`；真正等滿 300 秒才是 `attempt_1_timeout_300s`。舊的 `attempt_1_enabling_reverted_30s` 屬歷史版本命名，不應再當成新版唯一搜尋條件。
+- 首次異常保留在 Terminal／日誌，第二次成功不會抹除。這兩個事件日誌採追加方式，判讀時須對照本輪時間與 `manual_activation.log`，不能把舊事件算入本輪。
+- 兩個重試開關預設關閉。舊 `AI_APP_TEST_RETRY_ON_TIMEOUT=YES` 仍只允許等滿 300 秒後重試一次；它不會啟用 30 秒的快速判定。寫入、停用、下載授權仍各自獨立。
+- 開發環境以模擬時間執行 **20 個離線情境通過**，涵蓋首輪成功、回退後第二次成功／失敗、未開啟重試、仍在啟用中、未知狀態、確認期間狀態變更及事件落盤。這是本次程式修正的離線證據，**不是 Mac 的 `verify_flow_offline.py` 新增 20 項，也不加入 46 項實機統計**。
+
+### 本輪報告與展示
+
+本輪證據目錄：`reports/validation_runs/20261029T034521_440063Z_8770/`。每次執行都會新增批次；根目錄的摘要代表最近一次執行，交付時應使用對應批次的摘要與報告。
 
 | 報告 | 用途 |
 |---|---|
-| `regression_before.html` | 操作前一般回歸 |
-| `manual_activation.html` | 模型與 AI 應用操作；啟用 `--chat-send` 時，對話驗證包含於模型案例內 |
-| `regression_after.html` | 操作後一般回歸 |
+| `validation_summary.md` | 同批次各階段結果與分階段 Skip 原因 |
+| `regression_before.html` | 操作前一般回歸；本輪 40 passed／6 skipped |
+| `manual_activation.html` | 模型與 AI 應用兩項操作型測試；細節依實際起始狀態與日誌判讀 |
+| `regression_after.html` | 操作後一般回歸；本輪 41 passed／5 skipped |
+| `reports/report.html` | 另行使用直接 pytest 指令產生的單輪報告，不會自動合併上述三個階段 |
 
-一般模式或前置阻擋的批次不一定產生全部三份報告。`reports/report.html` 是另行使用 pytest 報表指令產生的單輪報告，不會自動合併這三個階段，也不能當作最新完整批次。
-
-給主管或接手者查看時，請提供**同一批次**的摘要與報告，避免混用不同時間的結果。
-
-若直接開啟 HTML 顯示不完整，在專案根目錄另開終端機執行：
+若直接開啟 HTML 顯示不完整，在專案根目錄開另一個 iTerm 分頁：
 
 ```bash
 python -m http.server 8000 --bind 127.0.0.1 --directory reports
 ```
 
-瀏覽器開啟 <http://localhost:8000/validation_runs/>，選擇批次目錄。結束後在該終端機按 `Ctrl+C` 關閉報告伺服器。
+瀏覽器開啟 `http://localhost:8000/validation_runs/`，選擇對應批次。結束展示後在伺服器分頁按 `Control+C`；這只關閉報告伺服器，不涉及 AI Hub 服務。
 
-### 統計怎麼看
+## 6. 查看失敗截圖與 Playwright Trace
 
-- `PASSED`：該案例通過。
-- `FAILED`／`ERROR`：案例失敗或執行發生錯誤，需查看日誌。
-- `SKIPPED`：因前置條件或資料不足而略過，不算實際通過；需核對原因。
-- 46 項是一般回歸案例數；前後各跑同一組，操作型 2 項另計，登入／登出另列流程階段。
+發生失敗後，通常可在 `test-results/` 下找到測試結果資料夾及 `trace.zip`（實際檔名與位置依 pytest-playwright 版本和設定而異）。先找檔案：
 
-最近一次已回報的完整實測整體 PASS，約 4 分 8 秒：前後回歸各 **41 passed、5 skipped**，操作型 **2 passed**，登入／登出通過。五項略過與群組、LDAP、API 端點及金鑰的資料或啟用條件不足有關。這是既有環境的結果，其他電腦與測試站仍需自行首次驗證。
-
-## 6. 常見問題
-
-| 問題 | 優先檢查 |
-|---|---|
-| 找不到 Python 套件或 pytest | 是否啟用 `.venv`，並在同一環境安裝 `requirements.txt` |
-| 找不到瀏覽器執行檔 | 執行 `python -m playwright install chromium` |
-| 找不到「模型管理」，畫面停在登入頁 | 登入狀態可能失效；使用 `--auto-login`，或先重新儲存登入狀態 |
-| 自動登入失敗 | `.env` 網址、帳密、權限與登入元件定位；不要提供密碼或登入 Token 協助排查 |
-| 出現 BLOCKED | 查看摘要指出的缺檔、環境或授權問題，不可當作 PASS |
-| 啟用中後回到未啟用 | 查看當輪 `manual_activation.log`、啟用事件與部署狀態；先確認服務現況再決定是否重跑 |
-| 看不到操作視窗 | 核對是否有 `--auto-login`、`--manual-activation`、`--chat-send`，以及是否已被前置關卡阻擋 |
-| 回歸案例數不是 46 | 確認專案是否完整、測試檔是否變更；先審核差異，不要直接放寬數量門檻 |
-
-失敗截圖與 Trace 通常位於 `test-results/`，實際位置以該次輸出為準。找到 `trace.zip` 後，可用 `python -m playwright show-trace` 搭配實際檔案路徑開啟。
-
-## 7. 專案主要檔案
-
-| 路徑 | 用途 |
-|---|---|
-| `pages/` | 頁面物件、元件定位與操作方法 |
-| `tests/test_site_access.py` | 網站連線與載入驗證 |
-| `tests/test_platform_manager.py` | 平台管理一般回歸 |
-| `tests/test_user_home.py` | 使用者介面一般回歸 |
-| `tests/manual_model_activation.py` | 模型操作與對話驗證 |
-| `tests/manual_ai_application_activation.py` | AI 應用操作驗證 |
-| `scripts/run_validation.py` | 整輪驗證與摘要入口 |
-| `scripts/save_login_state.py` | 登入狀態與登入／登出流程 |
-| `conftest.py` | pytest 共用 fixture 與瀏覽器／環境設定；請保留其原本位置 |
-| `pytest.ini` | pytest 設定 |
-| `requirements.txt` | Python 套件依賴 |
-| `.env.example` | 無真實帳密的設定範例 |
-| `TEST_CASES.md` | 案例與實測進度 |
-| `PLAYWRIGHT_NOTES.md` | 定位、等待、登入與部署問題的排查紀錄 |
-
-## 8. Git 與交接注意事項
-
-應交付完整原始碼、共用設定、套件清單及文件。每台電腦自行建立虛擬環境、安裝瀏覽器、設定帳密與登入狀態。
-
-請核對 `.gitignore` 至少排除以下本機資料；下列內容是建議規則，不代表已自動修改專案設定：
-
-```gitignore
-.env
-.auth/
-.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-reports/
-test-results/
+```bash
+find test-results -type f -name 'trace.zip'
+find test-results -type f -name '*.png'
 ```
 
-`.env.example` 可以提交，但不可包含真實密碼。報告、日誌、截圖、Trace 與對話證據可能包含內部網址、帳號、對話識別碼或頁面內容，分享前需檢查。
+直接開啟第一個找到的 Trace（不必把範例文字當檔案路徑貼上）：
 
-## 9. 目前驗證範圍與後續工作
+```bash
+TRACE=$(find test-results -type f -name 'trace.zip' -print -quit)
+if [ -n "$TRACE" ]; then
+  python -m playwright show-trace "$TRACE"
+else
+  echo '找不到 trace.zip；請確認本次執行有啟用 --tracing retain-on-failure，且確實有失敗測試'
+fi
+```
 
-目前已確認一般回歸、服務操作、對話送出、非空白回覆、歷史重開及整輪登入／登出流程可通過。歷史停用再啟用成功紀錄保留於既有測試文件；每輪實際走過的路徑仍以該批次日誌為準。
+在 Trace Viewer 依序看 **Actions → Before／After → Network → Console**，核對導航是否完成、所在網址、請求是否被取消或回應異常、前端 JavaScript 有無例外。不應只根據 Console 單一訊息就認定後端或登入故障。
 
-以下不列為本次已完成的實機驗證：
+若想在**沒有失敗**時確認 Trace Viewer 能開啟，可以單獨執行已知安全的測試，暫時改為 `--tracing on --screenshot on`：
 
-- 模型是否遵守「只回覆 OK」或其他回答品質判定：延後處理；目前僅要求回覆非空白。
-- 啟用失敗後第二次重試是否實際觸發：已有程式與離線檢查，目前尚缺確認實機觸發的證據。
-- AI 應用從未下載開始，完成下載再啟用：尚缺實機通過證據。
-- 登入失敗、回覆逾時、登出失敗及 `Ctrl+C` 等異常流程：目前尚缺本次實機驗證證據。
+```bash
+python -m pytest \
+  tests/test_platform_manager.py::test_platform_manager_is_loaded \
+  -v --headed --tracing on --screenshot on
+```
 
-接手順序建議：先完成安裝與一般回歸，再於允許中斷服務的環境執行完整驗證，最後保存同批次摘要與報告。
+> ⚠️ `.auth/user.json`、`reports/`、`test-results/`、截圖及 Trace 可能包含帳號資料、Token、頁面資訊或內部網址。分享前先檢查與去識別化；請勿直接提交至公開儲存庫，並確認 `.gitignore` 已排除不該版本控管的檔案。
+
+## 測試結果怎麼看
+
+```text
+PASSED   測試通過
+FAILED   測試失敗
+SKIPPED  因登入狀態、測試資料或其他前置條件而略過，不等於測試失敗
+```
+
+## 常見問題快速排查
+
+- 多項依賴登入的測試從一開始連續 FAILED：優先確認 `.auth/user.json` 是否過期，必要時執行 `python scripts/save_login_state.py`，先跑單項登入 Smoke Test，再跑完整回歸。
+- 第一次載入 `/platform-manager` 的 URL 驗證逾時，但後續測試正常：先查 Trace 的 Actions、Network、Console，再單獨重跑；不要立即調整 Locator 或加入固定 `sleep()`。
+- Console 出現 `Keycloak ready, isLoggedIn: false` 或 `Parameter "key" is required and cannot be empty`：代表前端登入／初始化有可追查線索，**不是單憑這兩行就能確認根因**；詳見筆記的 2026-10-21 偶發錯誤紀錄。
+- `chrome-error://chromewebdata/`：網站或網路連線失敗。
+- 網址包含 `openid-connect/auth`：可能正在重新導向到登入流程；若無法返回管理頁，確認登入狀態並重新執行 `python scripts/save_login_state.py`。
+- `strict mode violation`：Locator 同時符合兩個以上的元件，需要縮小範圍或使用精確比對。
+- `expected to be visible`：元件沒有顯示；先確認目前頁面與網址是否正確，再檢查 Locator。
+- `檔名.py:行號`：錯誤實際發生的位置，可在 VS Code 使用 `Command + P` 跳至該行。
+
+完整的 pytest／Playwright 錯誤判讀方式請參考 [PLAYWRIGHT_NOTES.md](PLAYWRIGHT_NOTES.md)。
+
+## 專案結構
+
+```text
+ai_hub-playwright-test/
+├── pages/
+│   ├── platform_manager_page.py
+│   └── user_home_page.py
+├── scripts/
+│   ├── save_login_state.py
+│   ├── run_validation.py       # 新增：固定驗證／報表入口
+│   └── selfcheck_validation.py # 新增：執行器自身的離線檢查
+├── tests/
+│   ├── test_site_access.py
+│   ├── test_platform_manager.py
+│   ├── test_user_home.py
+│   ├── manual_model_activation.py
+│   └── manual_ai_application_activation.py
+├── .auth/                   # 本機登入狀態，不提交 Git
+├── reports/                 # HTML 測試報告等輸出
+├── test-results/            # 測試附件／Trace（執行時產生）
+├── .env.example
+├── pytest.ini
+├── requirements.txt
+├── TEST_CASES.md
+├── PLAYWRIGHT_NOTES.md
+└── README.md
+```
+
+
+## Gherkin 登入與登出
+
+從專案根目錄執行。先啟用專案的 Python 虛擬環境，並在本機 `.env` 設定 `BASE_URL`、`TEST_USERNAME`、`TEST_PASSWORD`。測試帳號需能進入平台管理頁。
+
+```bash
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+python -m pytest tests/bdd/auth_steps.py -v -s
+```
+
+`tests/bdd/auth.feature` 描述使用者情境。`pytest-bdd` 依序執行 `auth_steps.py` 對應的步驟，Playwright 會開啟可見的 Chromium，登入、登出並以同一工作階段回訪管理頁。回訪時顯示登入表單才算通過。
+
+情境使用獨立的瀏覽器工作階段，帳密取自本機 `.env`，執行過程不寫入登入狀態檔。此情境由上述指令單獨執行，原本的 46 項回歸仍由既有指令執行。
+
+## Gherkin 完整驗證
+
+在專案根目錄啟用 `.venv`，確認本機 `.env` 已設定測試網址與測試帳密，再執行：
+
+```bash
+source .venv/bin/activate
+
+PYTEST_ADDOPTS="" \
+MODEL_TEST_WRITE=I_UNDERSTAND \
+MODEL_TEST_ALLOW_RETRY=YES \
+AI_APP_TEST_WRITE=I_UNDERSTAND \
+AI_APP_TEST_ALLOW_RETRY=YES \
+python scripts/run_validation.py --auto-login --manual-activation --chat-send --gherkin
+```
+
+順序為自動登入一次、46 項 Gherkin 前回歸、模型啟用與對話、MyAgent 啟用與入口、46 項 Gherkin 後回歸，最後用原登入視窗登出並回訪管理頁。前後回歸在背景執行。操作情境會顯示瀏覽器並即時列印步驟。整輪結果看 iTerm 的 `[overall]`，詳細結果見 `reports/validation_summary.md`。
+
+模型和 MyAgent 已啟用時會直接驗證使用流程。已下載但未啟用時會先啟用，符合條件時最多重試一次。模型情境會建立一則測試對話。
+
+| 單跑項目 | 在專案根目錄執行 |
+|---|---|
+| 登入與登出 | `python -m pytest tests/bdd/auth_steps.py -s --gherkin-terminal-reporter -vv` |
+| 模型與對話 | `MODEL_TEST_WRITE=I_UNDERSTAND MODEL_TEST_ALLOW_RETRY=YES MODEL_TEST_CHAT_SEND=YES python -m pytest tests/bdd/model_chat_steps.py -s --gherkin-terminal-reporter -vv` |
+| MyAgent | `AI_APP_TEST_WRITE=I_UNDERSTAND AI_APP_TEST_ALLOW_RETRY=YES python -m pytest tests/bdd/ai_app_steps.py -s --gherkin-terminal-reporter -vv` |
+| Gherkin 回歸 | `python -m pytest tests/bdd/*_regression_steps.py --gherkin-terminal-reporter -vv`（沿用本機有效的 `.auth/user.json`） |
+
+詳細案例對照與實測進度見 [TEST_CASES.md](TEST_CASES.md)。

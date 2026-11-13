@@ -219,13 +219,11 @@ def test_model_activation_preflight(authenticated_page: Page) -> None:
     print("此測試沒有點擊啟用或停用，也沒有下載模型。")
 
 
-@pytest.mark.auth
-def test_model_activation_and_chat(authenticated_page: Page) -> None:
-    """操作指定模型與 Chat UI；MODEL_TEST_CHAT_SEND=YES 時另送出一則訊息。"""
+def open_model_management_for_activation(page: Page) -> PlatformManagerPage:
     if os.getenv("MODEL_TEST_WRITE") != "I_UNDERSTAND":
         pytest.skip("操作測試預設關閉，需設定 MODEL_TEST_WRITE=I_UNDERSTAND")
 
-    manager = PlatformManagerPage(authenticated_page)
+    manager = PlatformManagerPage(page)
     manager.goto()
     manager.open_model_management()
 
@@ -241,36 +239,60 @@ def test_model_activation_and_chat(authenticated_page: Page) -> None:
     if state not in {"enabled", "downloaded_disabled"}:
         pytest.fail(f"無法從這個模型狀態安全地啟用：{state}")
 
-    try:
-        if state == "enabled" and os.getenv("MODEL_TEST_ALLOW_DISABLE") != "YES":
-            print("模型已啟用，未授權停用；直接驗證 Chat UI。")
-        else:
-            if state == "enabled":
-                print(f"\n準備停用指定模型：{TARGET_MODEL}")
-                manager.click_model_action(TARGET_MODEL, "停用")
-                _wait_for_downloaded_state(manager)
+    return manager
 
-            # 啟用前再次檢查狀態，防止等待期間被其他使用者改動。
-            assert manager.model_state(TARGET_MODEL) == "downloaded_disabled", (
-                "啟用前模型不是『已下載，未啟用』，停止操作"
-            )
-            assert not manager.other_running_models(TARGET_MODEL), (
-                "目前存在其他已啟用模型，停止操作"
-            )
-            print(f"\n準備啟用指定模型：{TARGET_MODEL}")
-            manager.click_model_action(TARGET_MODEL, "啟用")
-            _wait_enabled_with_optional_retry(manager)
 
-        assert manager.model_state(TARGET_MODEL) == "enabled", (
-            "Chat 驗證前模型已非啟用狀態，停止操作"
+def activate_target_model(manager: PlatformManagerPage) -> None:
+    state = manager.model_state(TARGET_MODEL)
+    if state not in {"enabled", "downloaded_disabled"}:
+        pytest.fail(f"模型狀態已變更，停止操作：{state}")
+    if manager.other_running_models(TARGET_MODEL):
+        pytest.skip("目前有其他已啟用或操作中的模型")
+
+    if state == "enabled" and os.getenv("MODEL_TEST_ALLOW_DISABLE") != "YES":
+        print("模型已啟用，未授權停用；直接驗證 Chat UI。")
+    else:
+        if state == "enabled":
+            print(f"\n準備停用指定模型：{TARGET_MODEL}")
+            manager.click_model_action(TARGET_MODEL, "停用")
+            _wait_for_downloaded_state(manager)
+
+        # 啟用前再次檢查狀態，防止等待期間被其他使用者改動。
+        assert manager.model_state(TARGET_MODEL) == "downloaded_disabled", (
+            "啟用前模型不是『已下載，未啟用』，停止操作"
         )
+        assert not manager.other_running_models(TARGET_MODEL), (
+            "目前存在其他已啟用模型，停止操作"
+        )
+        print(f"\n準備啟用指定模型：{TARGET_MODEL}")
+        manager.click_model_action(TARGET_MODEL, "啟用")
+        _wait_enabled_with_optional_retry(manager)
 
-        home = UserHomePage(authenticated_page)
-        home.goto()
-        home.expect_loaded(timeout_ms=100_000)
-        home.select_chat_model(TARGET_MODEL)
-        home.expect_chat_text_can_be_entered()
-        print("模型已啟用，Chat 模型可選取且可輸入文字（未送出訊息）。")
+
+def expect_target_model_enabled(manager: PlatformManagerPage) -> None:
+    assert manager.model_state(TARGET_MODEL) == "enabled", (
+        "Chat 驗證前模型已非啟用狀態，停止操作"
+    )
+
+
+def open_target_model_chat(page: Page) -> UserHomePage:
+    home = UserHomePage(page)
+    home.goto()
+    home.expect_loaded(timeout_ms=100_000)
+    home.select_chat_model(TARGET_MODEL)
+    home.expect_chat_text_can_be_entered()
+    print("模型已啟用，Chat 模型可選取且可輸入文字（未送出訊息）。")
+    return home
+
+
+@pytest.mark.auth
+def test_model_activation_and_chat(authenticated_page: Page) -> None:
+    """操作指定模型與 Chat UI；MODEL_TEST_CHAT_SEND=YES 時另送出一則訊息。"""
+    try:
+        manager = open_model_management_for_activation(authenticated_page)
+        activate_target_model(manager)
+        expect_target_model_enabled(manager)
+        home = open_target_model_chat(authenticated_page)
         if os.getenv("MODEL_TEST_CHAT_SEND") == "YES":
             token = uuid4().hex[:8]
             prompt = f"自動化測試 {token}，請只回覆 OK。"
